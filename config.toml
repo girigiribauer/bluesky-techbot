@@ -29,7 +29,7 @@ service = "https://bsky.social"
 interval_minutes = 30
 per_batch = 3
 gap_seconds = 120
-daily_limit = 100
+daily_limit = 150
 expire_hours = 72
 
 [web]

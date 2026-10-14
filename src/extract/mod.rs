@@ -88,86 +88,23 @@ pub enum Content {
 }
 
 pub fn card(html: &str, url: &str) -> Card {
+    let Ok(readability) = dom_smoothie::Readability::new(html, Some(url), None) else {
+        return Card::default();
+    };
+    from_metadata(
+        readability.get_article_metadata(readability.parse_json_ld()),
+        url,
+    )
+}
+
+pub fn from_metadata(metadata: dom_smoothie::Metadata, url: &str) -> Card {
     Card {
-        title: meta(html, "og:title").or_else(|| title_tag(html)),
-        description: meta(html, "og:description")
-            .or_else(|| meta(html, "description"))
-            .or_else(|| meta(html, "twitter:description"))
-            .unwrap_or_default(),
-        image: meta(html, "og:image")
-            .or_else(|| meta(html, "twitter:image"))
+        title: Some(metadata.title).filter(|title| !title.trim().is_empty()),
+        description: metadata.excerpt.unwrap_or_default(),
+        image: metadata
+            .image
             .and_then(|image| crate::url::absolutize(url, &image)),
     }
-}
-
-fn title_tag(html: &str) -> Option<String> {
-    let pattern = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok()?;
-    let value = pattern.captures(html)?.get(1)?.as_str().trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(unescape(value))
-}
-
-fn meta(html: &str, name: &str) -> Option<String> {
-    let tags = regex::Regex::new(r"(?is)<meta\b[^>]*>").ok()?;
-    let attributes =
-        regex::Regex::new(r#"(?i)([a-z][a-z0-9:_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#)
-            .ok()?;
-
-    for tag in tags.find_iter(html) {
-        let mut key: Option<&str> = None;
-        let mut content: Option<&str> = None;
-        for attribute in attributes.captures_iter(tag.as_str()) {
-            let value = attribute
-                .get(2)
-                .or_else(|| attribute.get(3))
-                .or_else(|| attribute.get(4))
-                .map(|found| found.as_str())
-                .unwrap_or_default();
-            match attribute.get(1).map(|found| found.as_str()) {
-                Some(found) if found.eq_ignore_ascii_case("property") => key = Some(value),
-                Some(found) if found.eq_ignore_ascii_case("name") => key = Some(value),
-                Some(found) if found.eq_ignore_ascii_case("content") => content = Some(value),
-                _ => {}
-            }
-        }
-        if !key.is_some_and(|found| found.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        let value = content.unwrap_or_default().trim();
-        if !value.is_empty() {
-            return Some(unescape(value));
-        }
-    }
-    None
-}
-
-fn unescape(text: &str) -> String {
-    let named = text
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ");
-
-    let decoded = match regex::Regex::new(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));") {
-        Ok(pattern) => pattern
-            .replace_all(&named, |found: &regex::Captures| {
-                let code = found
-                    .get(1)
-                    .and_then(|hex| u32::from_str_radix(hex.as_str(), 16).ok())
-                    .or_else(|| found.get(2).and_then(|digits| digits.as_str().parse().ok()));
-                match code.and_then(char::from_u32) {
-                    Some(character) => character.to_string(),
-                    None => found[0].to_string(),
-                }
-            })
-            .into_owned(),
-        Err(_) => named,
-    };
-
-    decoded.replace("&amp;", "&")
 }
 
 pub async fn extract(client: &reqwest::Client, url: &str, limits: &Limits) -> Result<Content> {
@@ -307,17 +244,6 @@ mod tests {
         assert_eq!(
             card(html, "https://example.com/a").description,
             "I've said \"hello\""
-        );
-    }
-
-    /// &amp; は最後に戻し、&amp;#39; を ' に取り違えないこと
-    #[test]
-    fn keeps_escaped_ampersand() {
-        let html = r#"<meta property="og:description" content="&amp;#39; と &amp;lt;">"#;
-
-        assert_eq!(
-            card(html, "https://example.com/a").description,
-            "&#39; と &lt;"
         );
     }
 }

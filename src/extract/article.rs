@@ -1,16 +1,19 @@
-use super::{Content, get_text, normalize};
+use super::{Card, Content, get_text, normalize};
 use crate::config::Limits;
 use anyhow::{Result, anyhow};
 use dom_smoothie::Readability;
 
 pub async fn extract(client: &reqwest::Client, url: &str, limits: &Limits) -> Result<Content> {
     let html = get_text(client, url).await?;
-    let card = super::card(&html, url);
     let source = url.to_string();
-    let extracted = tokio::task::spawn_blocking(move || -> Result<String> {
+    let (extracted, card) = tokio::task::spawn_blocking(move || -> Result<(String, Card)> {
         let mut readability = Readability::new(html.as_str(), Some(&source), None)?;
+        let card = super::from_metadata(
+            readability.get_article_metadata(readability.parse_json_ld()),
+            &source,
+        );
         let article = readability.parse()?;
-        Ok(article.text_content.to_string())
+        Ok((article.text_content.to_string(), card))
     })
     .await??;
 

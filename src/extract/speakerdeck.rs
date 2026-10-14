@@ -7,10 +7,12 @@ pub async fn extract(client: &reqwest::Client, url: &str, limits: &Limits) -> Re
     let page = get_text(client, url).await?;
 
     if let Some(text) = pdf_text(client, &page, limits).await? {
+        let source = url.to_string();
+        let card = tokio::task::spawn_blocking(move || super::card(&page, &source)).await?;
         return Ok(Content::Text {
             text,
             truncated: false,
-            card: super::card(&page, url),
+            card,
         });
     }
     slide_images(client, &page, limits.slides).await
