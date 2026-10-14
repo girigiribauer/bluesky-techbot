@@ -21,21 +21,14 @@ async fn main() -> Result<()> {
     let config = config::load("config.toml")?;
     let pool = db::connect(&config.db.path).await?;
 
-    if std::env::args().any(|arg| arg == "--post-one") {
-        pipeline::post_one(&config, &pool).await?;
-        return Ok(());
-    }
-
     if std::env::args().any(|arg| arg == "--once") {
         pipeline::run(&config, &pool).await;
         log!("一巡しました");
         return Ok(());
     }
 
-    let posting = !std::env::args().any(|arg| arg == "--no-post");
-
     let web_only = std::env::args().any(|arg| arg == "--web-only");
-    if !web_only && posting {
+    if !web_only {
         match pipeline::sync_posted(&config, &pool).await {
             Ok(_) => {}
             Err(error) => {

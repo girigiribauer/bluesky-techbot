@@ -19,13 +19,11 @@ min_body_chars = 300
 
 [judge]
 model = "claude-haiku-5-5"
-key_file = "/run/secrets/anthropic"
 batch = 20
 
 [bluesky]
 handle = "tech-invariants.bsky.social"
 service = "https://bsky.social"
-password_file = "/run/secrets/bluesky-app-password"
 
 [posting]
 interval_minutes = 30

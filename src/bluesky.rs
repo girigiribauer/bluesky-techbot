@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::extract::Transient;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -16,15 +16,13 @@ struct Created {
     uri: String,
 }
 
-pub fn app_password(config: &Config) -> Result<String> {
-    if let Ok(password) = std::env::var("BLUESKY_APP_PASSWORD")
-        && !password.trim().is_empty()
-    {
-        return Ok(password.trim().to_string());
+pub fn app_password() -> Result<String> {
+    let password = std::env::var("BLUESKY_APP_PASSWORD").unwrap_or_default();
+    if password.trim().is_empty() {
+        return Err(anyhow!(
+            "環境変数 BLUESKY_APP_PASSWORD が設定されていません"
+        ));
     }
-    let path = &config.bluesky.password_file;
-    let password = std::fs::read_to_string(path)
-        .with_context(|| format!("アプリパスワードが読めません: {path}"))?;
     Ok(password.trim().to_string())
 }
 

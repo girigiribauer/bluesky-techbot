@@ -31,6 +31,7 @@ pub struct Article {
     pub posted_at: Option<String>,
     pub post_uri: Option<String>,
     pub judge_error: Option<String>,
+    pub post_error: Option<String>,
     pub post_title: Option<String>,
     pub post_body: Option<String>,
     pub post_point: Option<String>,
@@ -120,6 +121,8 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("card_description", "TEXT"),
         ("card_image", "TEXT"),
         ("judged_at", "TEXT"),
+        ("post_error", "TEXT"),
+        ("post_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ];
     for (name, kind) in columns {
         if !existing.iter().any(|column| column == name) {
@@ -162,7 +165,7 @@ pub fn state_condition(state: &str) -> &'static str {
         "pass" => "verdict = 'pass' AND status = 'queued'",
         "posted" => "status = 'posted'",
         "drop" => "verdict = 'drop' OR status = 'expired'",
-        "failed" => "fetch_error IS NOT NULL OR judge_error IS NOT NULL",
+        "failed" => "fetch_error IS NOT NULL OR judge_error IS NOT NULL OR post_error IS NOT NULL",
         _ => "1 = 1",
     }
 }
@@ -173,7 +176,8 @@ pub async fn recent(pool: &SqlitePool, state: &str, limit: i64) -> Result<Vec<Ar
                 LENGTH(body) AS body_chars,
                 json_array_length(slide_urls) AS slide_count,
                 truncated, fetch_error, posted_at, post_uri,
-                verdict, reason, field, form, basis, depth, judge_error, post_title, post_body, post_point,
+                verdict, reason, field, form, basis, depth, judge_error, post_error,
+                post_title, post_body, post_point,
                 card_title, card_description, card_image
          FROM articles
          WHERE {}
@@ -209,6 +213,7 @@ pub async fn recent(pool: &SqlitePool, state: &str, limit: i64) -> Result<Vec<Ar
             posted_at: row.get("posted_at"),
             post_uri: row.get("post_uri"),
             judge_error: row.get("judge_error"),
+            post_error: row.get("post_error"),
             post_title: row.get("post_title"),
             post_body: row.get("post_body"),
             post_point: row.get("post_point"),
@@ -224,7 +229,7 @@ pub async fn count_states(pool: &SqlitePool) -> Result<(i64, i64, i64, i64, i64)
         "SELECT COUNT(*) AS total,
                 SUM(verdict = 'pass' AND status = 'queued') AS passed,
                 SUM(verdict = 'drop' OR status = 'expired') AS dropped,
-                SUM(fetch_error IS NOT NULL OR judge_error IS NOT NULL) AS failed,
+                SUM(fetch_error IS NOT NULL OR judge_error IS NOT NULL OR post_error IS NOT NULL) AS failed,
                 SUM(status = 'posted') AS posted
          FROM articles",
     )
@@ -237,6 +242,25 @@ pub async fn count_states(pool: &SqlitePool) -> Result<(i64, i64, i64, i64, i64)
         row.try_get("failed").unwrap_or(0),
         row.try_get("posted").unwrap_or(0),
     ))
+}
+
+pub async fn note_post_error(
+    pool: &SqlitePool,
+    id: i64,
+    error: String,
+    counts: bool,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE articles
+         SET post_error = ?, post_attempts = post_attempts + ?
+         WHERE id = ?",
+    )
+    .bind(error)
+    .bind(i64::from(counts))
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn clear_card_image(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -273,15 +297,16 @@ pub async fn request_card_refetch(pool: &SqlitePool, max_attempts: i64) -> Resul
     Ok(result.rows_affected())
 }
 
-pub async fn next_queued(pool: &SqlitePool) -> Result<Option<(i64, Queued)>> {
+pub async fn next_queued(pool: &SqlitePool, max_attempts: i64) -> Result<Option<(i64, Queued)>> {
     let row = sqlx::query(
         "SELECT id, url, title, card_title, card_description, card_image, post_title, post_body, post_point
          FROM articles
          WHERE status = 'queued' AND verdict = 'pass' AND posted_at IS NULL
-           AND fetched_at IS NOT NULL
+           AND fetched_at IS NOT NULL AND post_attempts < ?
          ORDER BY id ASC
          LIMIT 1",
     )
+    .bind(max_attempts)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|row| {
@@ -341,12 +366,16 @@ pub async fn posted_today(pool: &SqlitePool) -> Result<i64> {
 }
 
 pub async fn mark_posted(pool: &SqlitePool, id: i64, uri: &str) -> Result<()> {
-    sqlx::query("UPDATE articles SET status = 'posted', post_uri = ?, posted_at = ? WHERE id = ?")
-        .bind(uri)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE articles
+         SET status = 'posted', post_uri = ?, posted_at = ?, post_error = NULL
+         WHERE id = ?",
+    )
+    .bind(uri)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -622,7 +651,7 @@ mod tests {
         add(&pool, 1, "queued", "pass", Some("2026-10-13T00:00:00Z")).await;
         add(&pool, 2, "queued", "pass", None).await;
 
-        let (id, _) = next_queued(&pool).await.unwrap().unwrap();
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(id, 2);
     }
@@ -634,7 +663,7 @@ mod tests {
         add(&pool, 3, "queued", "pass", None).await;
         add(&pool, 4, "queued", "pass", None).await;
 
-        let (id, _) = next_queued(&pool).await.unwrap().unwrap();
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(id, 3);
     }
@@ -650,6 +679,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(status_of(&pool, 1).await, "posted");
+    }
+
+    /// 通信が切れて投稿できなかったときは、投稿の試行回数を増やさないこと
+    #[tokio::test]
+    async fn transient_post_error_keeps_attempts() {
+        let pool = test_pool().await;
+        add(&pool, 1, "queued", "pass", None).await;
+
+        note_post_error(&pool, 1, "接続できません".to_string(), false)
+            .await
+            .unwrap();
+
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
+        assert_eq!(id, 1);
+    }
+
+    /// 記事そのものが原因で投稿できない記事は、何度か試したら投稿待ちから外し、次の記事に進むこと
+    #[tokio::test]
+    async fn skips_article_that_cannot_be_posted() {
+        let pool = test_pool().await;
+        add(&pool, 1, "queued", "pass", None).await;
+        add(&pool, 2, "queued", "pass", None).await;
+
+        for _ in 0..3 {
+            note_post_error(&pool, 1, "本文が空です".to_string(), true)
+                .await
+                .unwrap();
+        }
+
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
+        assert_eq!(id, 2);
+    }
+
+    /// 投稿できたら、前に失敗した記録は消すこと
+    #[tokio::test]
+    async fn clears_post_error_when_posted() {
+        let pool = test_pool().await;
+        add(&pool, 1, "queued", "pass", None).await;
+        note_post_error(&pool, 1, "接続できません".to_string(), false)
+            .await
+            .unwrap();
+
+        mark_posted(&pool, 1, "at://example/post/1").await.unwrap();
+
+        let error: Option<String> = sqlx::query("SELECT post_error FROM articles WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("post_error");
+        assert_eq!(error, None);
     }
 
     /// 判定の相手につながらなかったときは、記事の試行回数を増やさないこと
@@ -679,7 +758,7 @@ mod tests {
         collected_days_ago(&pool, 1, 4).await;
 
         let expired = expire_stale(&pool, 72).await.unwrap();
-        let (id, _) = next_queued(&pool).await.unwrap().unwrap();
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(expired, 1);
         assert_eq!(status_of(&pool, 1).await, "expired");
@@ -723,7 +802,7 @@ mod tests {
         clear_card(&pool, 1, 0).await;
         request_card_refetch(&pool, 3).await.unwrap();
 
-        let (id, _) = next_queued(&pool).await.unwrap().unwrap();
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(id, 2);
     }
@@ -736,7 +815,7 @@ mod tests {
         clear_card(&pool, 1, 3).await;
 
         let asked = request_card_refetch(&pool, 3).await.unwrap();
-        let (id, _) = next_queued(&pool).await.unwrap().unwrap();
+        let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(asked, 0);
         assert_eq!(id, 1);

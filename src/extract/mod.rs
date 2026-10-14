@@ -144,11 +144,30 @@ fn meta(html: &str, name: &str) -> Option<String> {
 }
 
 fn unescape(text: &str) -> String {
-    text.replace("&amp;", "&")
+    let named = text
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ");
+
+    let decoded = match regex::Regex::new(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));") {
+        Ok(pattern) => pattern
+            .replace_all(&named, |found: &regex::Captures| {
+                let code = found
+                    .get(1)
+                    .and_then(|hex| u32::from_str_radix(hex.as_str(), 16).ok())
+                    .or_else(|| found.get(2).and_then(|digits| digits.as_str().parse().ok()));
+                match code.and_then(char::from_u32) {
+                    Some(character) => character.to_string(),
+                    None => found[0].to_string(),
+                }
+            })
+            .into_owned(),
+        Err(_) => named,
+    };
+
+    decoded.replace("&amp;", "&")
 }
 
 pub async fn extract(client: &reqwest::Client, url: &str, limits: &Limits) -> Result<Content> {
@@ -278,5 +297,27 @@ mod tests {
     fn unescapes_entities() {
         let html = r#"<meta property="og:description" content="A &amp; B">"#;
         assert_eq!(card(html, "https://example.com/a").description, "A & B");
+    }
+
+    /// 数字で書かれた文字（&#34; や &#x27;）も、元の文字に戻すこと
+    #[test]
+    fn unescapes_numeric_entities() {
+        let html = r#"<meta property="og:description" content="I&#x27;ve said &#34;hello&#34;">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").description,
+            "I've said \"hello\""
+        );
+    }
+
+    /// &amp; は最後に戻し、&amp;#39; を ' に取り違えないこと
+    #[test]
+    fn keeps_escaped_ampersand() {
+        let html = r#"<meta property="og:description" content="&amp;#39; と &amp;lt;">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").description,
+            "&#39; と &lt;"
+        );
     }
 }

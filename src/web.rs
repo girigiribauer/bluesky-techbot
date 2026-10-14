@@ -183,16 +183,25 @@ fn item(article: &db::Article) -> String {
         });
     }
 
-    let reason = match (&article.reason, &article.fetch_error, &article.judge_error) {
-        (_, Some(error), _) => format!(
+    let reason = match (
+        &article.reason,
+        &article.fetch_error,
+        &article.judge_error,
+        &article.post_error,
+    ) {
+        (_, Some(error), _, _) => format!(
             "<div class=\"reason\">取得できません: {}</div>",
             escape(error)
         ),
-        (_, _, Some(error)) => format!(
+        (_, _, Some(error), _) => format!(
             "<div class=\"reason\">判定できません: {}</div>",
             escape(error)
         ),
-        (Some(reason), _, _) => format!("<div class=\"reason\">{}</div>", escape(reason)),
+        (_, _, _, Some(error)) => format!(
+            "<div class=\"reason\">投稿できません: {}</div>",
+            escape(error)
+        ),
+        (Some(reason), _, _, _) => format!("<div class=\"reason\">{}</div>", escape(reason)),
         _ => String::new(),
     };
 
@@ -222,7 +231,10 @@ fn state(article: &db::Article) -> (&'static str, String) {
             "<span class=\"badge drop\">期限切れ</span>".to_string(),
         );
     }
-    if article.fetch_error.is_some() || article.judge_error.is_some() {
+    if article.fetch_error.is_some()
+        || article.judge_error.is_some()
+        || article.post_error.is_some()
+    {
         return (
             "failed",
             "<span class=\"badge failed\">失敗</span>".to_string(),

@@ -66,7 +66,7 @@ async fn judge_articles(config: &Config, pool: &SqlitePool) -> Result<Judged> {
     }
 
     let client = http::client()?;
-    let key = judge::api_key(config)?;
+    let key = judge::api_key()?;
 
     let mut done = 0;
     for article in &pending {
@@ -291,7 +291,7 @@ pub async fn sync_posted(config: &Config, pool: &SqlitePool) -> Result<usize> {
 }
 
 pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
-    let Some((id, queued)) = db::next_queued(pool).await? else {
+    let Some((id, queued)) = db::next_queued(pool, config.collect.max_attempts).await? else {
         log!("投稿待ちの記事がありません");
         return Ok(false);
     };
@@ -306,18 +306,19 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
         queued.card_image.as_deref(),
     );
     if post::empty(&draft) {
-        return Err(anyhow::anyhow!("本文が空です（記事 {id}）"));
+        let error = format!("本文が空です（記事 {id}）");
+        db::note_post_error(pool, id, error.clone(), true).await?;
+        return Err(anyhow::anyhow!(error));
     }
     if post::too_long(&draft) {
-        return Err(anyhow::anyhow!(
-            "本文が{}字で上限を超えています",
-            draft.text.chars().count()
-        ));
+        let error = format!("本文が{}字で上限を超えています", draft.text.chars().count());
+        db::note_post_error(pool, id, error.clone(), true).await?;
+        return Err(anyhow::anyhow!(error));
     }
 
     let record = post::record(&draft, &chrono::Utc::now().to_rfc3339());
     let client = http::client()?;
-    let password = bluesky::app_password(config)?;
+    let password = bluesky::app_password()?;
     let posted = bluesky::post(
         &client,
         config,
@@ -334,7 +335,11 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
             log!("画像が使えないので、画像なしで出します（記事 {id}）: {error:#}");
             bluesky::post(&client, config, &password, &record, None).await?
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            let counts = !extract::is_transient(&error);
+            db::note_post_error(pool, id, format!("{error:#}"), counts).await?;
+            return Err(error);
+        }
     };
 
     db::mark_posted(pool, id, &uri).await?;

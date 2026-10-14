@@ -54,13 +54,11 @@ pub struct Posting {
 pub struct Bluesky {
     pub handle: String,
     pub service: String,
-    pub password_file: String,
 }
 
 #[derive(Clone, Deserialize)]
 pub struct Judge {
     pub model: String,
-    pub key_file: String,
     pub batch: i64,
 }
 
