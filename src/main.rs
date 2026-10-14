@@ -50,8 +50,8 @@ async fn main() -> Result<()> {
             let interval = Duration::from_secs(poster_config.posting.interval_minutes * 60);
             loop {
                 pipeline::wait_until_due(&poster_config, &poster_pool).await;
-                pipeline::post_batch(&poster_config, &poster_pool).await;
-                pipeline::sleep_watching(interval).await;
+                let result = pipeline::post_batch(&poster_config, &poster_pool).await;
+                pipeline::sleep_watching(pipeline::next_wait(&result, interval)).await;
             }
         });
     }

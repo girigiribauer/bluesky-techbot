@@ -201,8 +201,7 @@ pub async fn sleep_watching(duration: Duration) {
     let Ok(expected) = chrono::Duration::from_std(duration) else {
         return;
     };
-    let gap = (chrono::Utc::now() - before) - expected;
-    if gap > chrono::Duration::minutes(2) {
+    if let Some(gap) = gap_to_notice(chrono::Utc::now() - before, expected) {
         log!(
             "{}ぶん止まっていました（スリープか時刻の飛び）",
             crate::log::gap_text(gap)
@@ -210,7 +209,30 @@ pub async fn sleep_watching(duration: Duration) {
     }
 }
 
-pub async fn post_batch(config: &Config, pool: &SqlitePool) {
+pub fn gap_to_notice(
+    slept: chrono::Duration,
+    expected: chrono::Duration,
+) -> Option<chrono::Duration> {
+    let gap = slept - expected;
+    (gap > chrono::Duration::minutes(2)).then_some(gap)
+}
+
+pub const RETRY_SECONDS: u64 = 120;
+
+pub enum Posting {
+    Done,
+    Nothing,
+    Failed,
+}
+
+pub fn next_wait(result: &Posting, interval: Duration) -> Duration {
+    match result {
+        Posting::Failed => Duration::from_secs(RETRY_SECONDS),
+        Posting::Done | Posting::Nothing => interval,
+    }
+}
+
+pub async fn post_batch(config: &Config, pool: &SqlitePool) -> Posting {
     let gap = Duration::from_secs(config.posting.gap_seconds);
 
     if let Ok(waiting) = db::queued_count(pool).await {
@@ -230,25 +252,26 @@ pub async fn post_batch(config: &Config, pool: &SqlitePool) {
                     "1日の上限（{}件）に達しています",
                     config.posting.daily_limit
                 );
-                return;
+                return Posting::Nothing;
             }
             Err(error) => {
                 log_error!("投稿できません: {error:#}");
-                return;
+                return Posting::Failed;
             }
             _ => {}
         }
 
         match post_one(config, pool).await {
-            Ok(false) => return,
+            Ok(false) => return Posting::Nothing,
             Ok(true) => {}
             Err(error) => {
                 log_error!("投稿できません: {error:#}");
-                return;
+                return Posting::Failed;
             }
         }
         tokio::time::sleep(gap).await;
     }
+    Posting::Done
 }
 
 pub async fn sync_posted(config: &Config, pool: &SqlitePool) -> Result<usize> {
@@ -308,8 +331,8 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
         Ok(uri) => uri,
         Err(error) if bluesky::is_thumb_unusable(&error) => {
             db::clear_card_image(pool, id).await?;
-            log!("画像が使えないので、次の回に画像なしで出します（記事 {id}）: {error:#}");
-            return Ok(false);
+            log!("画像が使えないので、画像なしで出します（記事 {id}）: {error:#}");
+            bluesky::post(&client, config, &password, &record, None).await?
         }
         Err(error) => return Err(error),
     };
@@ -317,4 +340,36 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
     db::mark_posted(pool, id, &uri).await?;
     log!("{}", bluesky::web_url(&config.bluesky.handle, &uri));
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 通信で流れた回のあとは短い間隔で試し直し、出せた回・出すものが無い回はいつもの間隔で待つこと
+    #[test]
+    fn waits_shorter_after_failure() {
+        let interval = Duration::from_secs(30 * 60);
+
+        assert_eq!(
+            next_wait(&Posting::Failed, interval),
+            Duration::from_secs(RETRY_SECONDS)
+        );
+        assert_eq!(next_wait(&Posting::Done, interval), interval);
+        assert_eq!(next_wait(&Posting::Nothing, interval), interval);
+        assert!(Duration::from_secs(RETRY_SECONDS) < interval);
+    }
+
+    /// 待つはずだった時間より2分を超えて過ぎていたら、止まっていた時間として知らせること
+    #[test]
+    fn notices_long_gaps() {
+        let expected = chrono::Duration::minutes(30);
+
+        assert_eq!(
+            gap_to_notice(chrono::Duration::minutes(180), expected),
+            Some(chrono::Duration::minutes(150))
+        );
+        assert_eq!(gap_to_notice(chrono::Duration::minutes(31), expected), None);
+        assert_eq!(gap_to_notice(expected, expected), None);
+    }
 }
