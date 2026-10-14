@@ -239,6 +239,14 @@ pub async fn count_states(pool: &SqlitePool) -> Result<(i64, i64, i64, i64, i64)
     ))
 }
 
+pub async fn clear_card_image(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("UPDATE articles SET card_image = NULL WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn expire_stale(pool: &SqlitePool, hours: i64) -> Result<u64> {
     let result = sqlx::query(
         "UPDATE articles

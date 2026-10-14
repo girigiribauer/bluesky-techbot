@@ -103,15 +103,26 @@ jobs:
       - name: VPS へデプロイ
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          VPS_IP: ${{ secrets.VPS_IP }}
           SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
           SERVICE_DIR: ${{ secrets.SERVICE_DIR }}
         run: |
+          missing=""
+          if [ -z "$SSH_PRIVATE_KEY" ]; then missing="$missing SSH_PRIVATE_KEY"; fi
+          if [ -z "$VPS_IP" ]; then missing="$missing VPS_IP"; fi
+          if [ -z "$SSH_PORT" ]; then missing="$missing VPS_SSH_PORT"; fi
+          if [ -z "$SERVICE_DIR" ]; then missing="$missing SERVICE_DIR"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::VPS の秘密が未設定です:$missing（Settings → Secrets and variables → Actions で登録してください）"
+            exit 1
+          fi
+
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-          ssh -i ~/.ssh/id_rsa -p $SSH_PORT -o StrictHostKeyChecking=no ubuntu@${{ secrets.VPS_IP }} "cd $SERVICE_DIR && \
-          docker compose pull app && docker compose up -d app"
+          ssh -i ~/.ssh/id_rsa -p "$SSH_PORT" -o StrictHostKeyChecking=no "ubuntu@$VPS_IP" \
+            "cd '$SERVICE_DIR' && docker compose pull app && docker compose up -d app"
 
       - name: 秘密鍵の削除
         if: always()

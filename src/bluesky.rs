@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::extract::Transient;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +29,24 @@ pub fn app_password(config: &Config) -> Result<String> {
 }
 
 pub const BLOB_LIMIT: usize = 900_000;
+
+const THUMB_TRIES: usize = 3;
+const THUMB_RETRY_SECONDS: u64 = 2;
+
+#[derive(Debug)]
+pub struct ThumbUnusable(pub String);
+
+impl std::fmt::Display for ThumbUnusable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ThumbUnusable {}
+
+pub fn is_thumb_unusable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<ThumbUnusable>())
+}
 
 #[derive(Deserialize)]
 struct Records {
@@ -112,9 +131,20 @@ pub async fn post(
     let session = login(client, config, password).await?;
 
     let mut record = record.clone();
-    if let Some(url) = thumb_source
-        && let Some(blob) = upload_thumb(client, config, &session, url).await
-    {
+    if let Some(url) = thumb_source {
+        let mut attempt = 1;
+        let blob = loop {
+            match upload_thumb(client, config, &session, url).await {
+                Ok(blob) => break blob,
+                Err(error) if attempt < THUMB_TRIES && crate::extract::is_transient(&error) => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(THUMB_RETRY_SECONDS)).await;
+                }
+                Err(error) => {
+                    return Err(error.context("リンクカードの画像を添付できません"));
+                }
+            }
+        };
         record["embed"]["external"]["thumb"] = blob;
     }
 
@@ -147,13 +177,24 @@ async fn upload_thumb(
     config: &Config,
     session: &Session,
     url: &str,
-) -> Option<Value> {
-    let response = client.get(url).send().await.ok()?;
+) -> Result<Value> {
+    let response = crate::extract::get(client, url).await?;
     if !response.status().is_success() {
-        return None;
+        return Err(anyhow::Error::new(ThumbUnusable(format!(
+            "画像を取得できません（{}）: {url}",
+            response.status()
+        ))));
     }
-    let bytes = response.bytes().await.ok()?.to_vec();
-    let (bytes, mime) = shrink(bytes)?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(Transient(format!("画像の受け取りが切れました: {error}")))
+        })?
+        .to_vec();
+    let (bytes, mime) = shrink(bytes).ok_or_else(|| {
+        anyhow::Error::new(ThumbUnusable(format!("画像を使える形にできません: {url}")))
+    })?;
 
     let uploaded = client
         .post(format!(
@@ -165,12 +206,22 @@ async fn upload_thumb(
         .body(bytes)
         .send()
         .await
-        .ok()?;
-    if !uploaded.status().is_success() {
-        return None;
+        .map_err(|error| {
+            if error.is_timeout() || error.is_connect() || error.is_request() {
+                anyhow::Error::new(Transient(format!("画像を上げられません: {error}")))
+            } else {
+                anyhow::Error::new(error)
+            }
+        })?;
+    let status = uploaded.status();
+    if !status.is_success() {
+        let text = uploaded.text().await.unwrap_or_default();
+        return Err(anyhow!("画像の受け取りを断られました（{status}）: {text}"));
     }
-    let body: Value = uploaded.json().await.ok()?;
-    body.get("blob").cloned()
+    let body: Value = uploaded.json().await?;
+    body.get("blob")
+        .cloned()
+        .ok_or_else(|| anyhow!("画像の返事に blob がありません"))
 }
 
 fn shrink(bytes: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
@@ -230,6 +281,18 @@ pub fn web_url(handle: &str, uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 画像が使えないと分かった誤りは、通信の一時的な失敗と区別できること
+    #[test]
+    fn separates_unusable_thumb_from_transient() {
+        let unusable = anyhow::Error::new(ThumbUnusable("画像を取得できません（404）".into()));
+        let transient = anyhow::Error::new(Transient("画像の受け取りが切れました".into()));
+
+        assert!(is_thumb_unusable(&unusable));
+        assert!(!crate::extract::is_transient(&unusable));
+        assert!(!is_thumb_unusable(&transient));
+        assert!(crate::extract::is_transient(&transient));
+    }
 
     /// 投稿後に返る at:// 形式のURIから、ブラウザで開けるURLを組み立てること
     #[test]

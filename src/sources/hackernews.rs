@@ -32,7 +32,16 @@ pub async fn fetch(
             ("hitsPerPage", "100"),
         ])
         .send()
-        .await?
+        .await
+        .map_err(|error| {
+            if error.is_timeout() || error.is_connect() || error.is_request() {
+                anyhow::Error::new(crate::extract::Transient(format!(
+                    "接続できません: {error}"
+                )))
+            } else {
+                anyhow::Error::new(error)
+            }
+        })?
         .error_for_status()?
         .json()
         .await?;

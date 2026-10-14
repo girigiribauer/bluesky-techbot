@@ -6,13 +6,7 @@ pub async fn fetch(
     source: &str,
     url: &str,
 ) -> Result<Vec<db::NewArticle>> {
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let bytes = crate::extract::get(client, url).await?.bytes().await?;
     let parsed = feed_rs::parser::parse(&bytes[..])?;
 
     let mut articles = Vec::new();

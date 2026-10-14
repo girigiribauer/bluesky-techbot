@@ -30,7 +30,9 @@ pub fn draft(
         link: url.to_string(),
         card_title: title.to_string(),
         card_description: card_description.to_string(),
-        card_image: card_image.map(|image| image.to_string()),
+        card_image: card_image
+            .map(|image| image.trim().to_string())
+            .filter(|image| !image.is_empty()),
     }
 }
 
@@ -62,6 +64,45 @@ pub fn empty(draft: &Draft) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 画像の場所が空のときは、画像なしとして扱うこと
+    #[test]
+    fn treats_empty_image_as_none() {
+        let empty = draft(
+            "題名",
+            "要約",
+            "要点",
+            "https://example.com/a",
+            "元",
+            "紹介",
+            Some(""),
+        );
+        let blank = draft(
+            "題名",
+            "要約",
+            "要点",
+            "https://example.com/a",
+            "元",
+            "紹介",
+            Some("  "),
+        );
+        let given = draft(
+            "題名",
+            "要約",
+            "要点",
+            "https://example.com/a",
+            "元",
+            "紹介",
+            Some("https://example.com/a.png"),
+        );
+
+        assert_eq!(empty.card_image, None);
+        assert_eq!(blank.card_image, None);
+        assert_eq!(
+            given.card_image.as_deref(),
+            Some("https://example.com/a.png")
+        );
+    }
 
     /// 投稿レコードは、本文・作成日時・リンクカードを持つこと
     #[test]

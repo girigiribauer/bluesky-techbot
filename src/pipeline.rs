@@ -7,8 +7,8 @@ use std::time::Duration;
 pub async fn run(config: &Config, pool: &SqlitePool) {
     log!("--- 収集を始めます");
     match sources::collect(config, pool).await {
-        Ok(added) => log!("collected: {added} new"),
-        Err(error) => log_error!("collect failed: {error:#}"),
+        Ok(added) => log!("集めました {added}件"),
+        Err(error) => log_error!("情報源から集められません: {error:#}"),
     }
 
     match db::expire_stale(pool, config.posting.expire_hours).await {
@@ -16,22 +16,22 @@ pub async fn run(config: &Config, pool: &SqlitePool) {
             "収集から{}時間を過ぎた{n}件を、投稿待ちから外しました",
             config.posting.expire_hours
         ),
-        Err(error) => log_error!("expire failed: {error:#}"),
+        Err(error) => log_error!("期限切れの処理に失敗しました: {error:#}"),
         _ => {}
     }
 
     log!("--- 本文を取ります");
     match db::request_card_refetch(pool, config.collect.max_attempts).await {
         Ok(n) if n > 0 => log!("カード情報が無い{n}件を取り直します"),
-        Err(error) => log_error!("card refetch failed: {error:#}"),
+        Err(error) => log_error!("カード情報の取り直しを頼めません: {error:#}"),
         _ => {}
     }
     loop {
         match extract_bodies(config, pool).await {
             Ok(0) => break,
-            Ok(done) => log!("extracted: {done}"),
+            Ok(done) => log!("本文を取りました {done}件"),
             Err(error) => {
-                log_error!("extract failed: {error:#}");
+                log_error!("本文を取れません: {error:#}");
                 break;
             }
         }
@@ -41,13 +41,13 @@ pub async fn run(config: &Config, pool: &SqlitePool) {
     loop {
         match judge_articles(config, pool).await {
             Ok(Judged::Batch(0)) => break,
-            Ok(Judged::Batch(done)) => log!("judged: {done}"),
+            Ok(Judged::Batch(done)) => log!("判定しました {done}件"),
             Ok(Judged::Unreachable) => {
                 log!("判定の相手につながらないので、次の回にやり直します");
                 break;
             }
             Err(error) => {
-                log_error!("judge failed: {error:#}");
+                log_error!("判定できません: {error:#}");
                 break;
             }
         }
@@ -219,7 +219,7 @@ pub async fn post_batch(config: &Config, pool: &SqlitePool) {
 
     match db::request_card_refetch(pool, config.collect.max_attempts).await {
         Ok(n) if n > 0 => log!("カード情報が無い{n}件は、取り直すまで投稿を見送ります"),
-        Err(error) => log_error!("card refetch failed: {error:#}"),
+        Err(error) => log_error!("カード情報の取り直しを頼めません: {error:#}"),
         _ => {}
     }
 
@@ -233,7 +233,7 @@ pub async fn post_batch(config: &Config, pool: &SqlitePool) {
                 return;
             }
             Err(error) => {
-                log_error!("post failed: {error:#}");
+                log_error!("投稿できません: {error:#}");
                 return;
             }
             _ => {}
@@ -243,7 +243,7 @@ pub async fn post_batch(config: &Config, pool: &SqlitePool) {
             Ok(false) => return,
             Ok(true) => {}
             Err(error) => {
-                log_error!("post failed: {error:#}");
+                log_error!("投稿できません: {error:#}");
                 return;
             }
         }
@@ -295,14 +295,24 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
     let record = post::record(&draft, &chrono::Utc::now().to_rfc3339());
     let client = http::client()?;
     let password = bluesky::app_password(config)?;
-    let uri = bluesky::post(
+    let posted = bluesky::post(
         &client,
         config,
         &password,
         &record,
         draft.card_image.as_deref(),
     )
-    .await?;
+    .await;
+
+    let uri = match posted {
+        Ok(uri) => uri,
+        Err(error) if bluesky::is_thumb_unusable(&error) => {
+            db::clear_card_image(pool, id).await?;
+            log!("画像が使えないので、次の回に画像なしで出します（記事 {id}）: {error:#}");
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
 
     db::mark_posted(pool, id, &uri).await?;
     log!("{}", bluesky::web_url(&config.bluesky.handle, &uri));
