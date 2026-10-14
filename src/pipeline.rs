@@ -1,0 +1,310 @@
+use crate::config::Config;
+use crate::{bluesky, db, extract, http, judge, post, sources};
+use anyhow::Result;
+use sqlx::SqlitePool;
+use std::time::Duration;
+
+pub async fn run(config: &Config, pool: &SqlitePool) {
+    log!("--- 収集を始めます");
+    match sources::collect(config, pool).await {
+        Ok(added) => log!("collected: {added} new"),
+        Err(error) => log_error!("collect failed: {error:#}"),
+    }
+
+    match db::expire_stale(pool, config.posting.expire_hours).await {
+        Ok(n) if n > 0 => log!(
+            "収集から{}時間を過ぎた{n}件を、投稿待ちから外しました",
+            config.posting.expire_hours
+        ),
+        Err(error) => log_error!("expire failed: {error:#}"),
+        _ => {}
+    }
+
+    log!("--- 本文を取ります");
+    match db::request_card_refetch(pool, config.collect.max_attempts).await {
+        Ok(n) if n > 0 => log!("カード情報が無い{n}件を取り直します"),
+        Err(error) => log_error!("card refetch failed: {error:#}"),
+        _ => {}
+    }
+    loop {
+        match extract_bodies(config, pool).await {
+            Ok(0) => break,
+            Ok(done) => log!("extracted: {done}"),
+            Err(error) => {
+                log_error!("extract failed: {error:#}");
+                break;
+            }
+        }
+    }
+
+    log!("--- 判定します");
+    loop {
+        match judge_articles(config, pool).await {
+            Ok(Judged::Batch(0)) => break,
+            Ok(Judged::Batch(done)) => log!("judged: {done}"),
+            Ok(Judged::Unreachable) => {
+                log!("判定の相手につながらないので、次の回にやり直します");
+                break;
+            }
+            Err(error) => {
+                log_error!("judge failed: {error:#}");
+                break;
+            }
+        }
+    }
+}
+
+enum Judged {
+    Batch(usize),
+    Unreachable,
+}
+
+async fn judge_articles(config: &Config, pool: &SqlitePool) -> Result<Judged> {
+    let pending = db::pending_judge(pool, config.judge.batch, config.collect.max_attempts).await?;
+    if pending.is_empty() {
+        return Ok(Judged::Batch(0));
+    }
+
+    let client = http::client()?;
+    let key = judge::api_key(config)?;
+
+    let mut done = 0;
+    for article in &pending {
+        match judge::judge(
+            &client,
+            config,
+            &key,
+            &article.title,
+            &article.source,
+            &article.body,
+        )
+        .await
+        {
+            Ok(verdict) => db::save_verdict(pool, article.id, Some(&verdict), None).await?,
+            Err(error) if extract::is_transient(&error) => {
+                db::defer_verdict(pool, article.id, format!("{error:#}")).await?;
+                return Ok(Judged::Unreachable);
+            }
+            Err(error) => {
+                db::save_verdict(pool, article.id, None, Some(format!("{error:#}"))).await?
+            }
+        }
+        done += 1;
+    }
+    Ok(Judged::Batch(done))
+}
+
+async fn extract_bodies(config: &Config, pool: &SqlitePool) -> Result<usize> {
+    let client = http::client()?;
+    let pending = db::pending_fetch(
+        pool,
+        config.collect.fetch_batch,
+        config.collect.max_attempts,
+    )
+    .await?;
+    let delay = Duration::from_secs(config.collect.fetch_delay_seconds);
+
+    let mut done = 0;
+    for article in &pending {
+        match extract::extract(&client, &article.url, &config.limits).await {
+            Ok(extract::Content::Text {
+                text,
+                truncated,
+                card,
+            }) => {
+                db::save_body(
+                    pool,
+                    article.id,
+                    db::Extracted {
+                        body: Some(text),
+                        truncated,
+                        card_title: card.title,
+                        card_description: Some(card.description),
+                        card_image: card.image,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(extract::Content::Slides {
+                urls,
+                truncated,
+                card,
+            }) => {
+                db::save_body(
+                    pool,
+                    article.id,
+                    db::Extracted {
+                        slide_urls: Some(serde_json::to_string(&urls)?),
+                        truncated,
+                        card_title: card.title,
+                        card_description: Some(card.description),
+                        card_image: card.image,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Err(error) if extract::is_transient(&error) => {
+                db::defer_body(pool, article.id, format!("{error:#}")).await?;
+            }
+            Err(error) => {
+                db::save_body(
+                    pool,
+                    article.id,
+                    db::Extracted {
+                        error: Some(format!("{error:#}")),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+        }
+        done += 1;
+        tokio::time::sleep(delay).await;
+    }
+    Ok(done)
+}
+
+pub async fn wait_until_due(config: &Config, pool: &SqlitePool) {
+    let interval = chrono::Duration::minutes(config.posting.interval_minutes as i64);
+    let Ok(Some(last)) = db::last_posted_at(pool).await else {
+        return;
+    };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(&last) else {
+        return;
+    };
+
+    let due = last.with_timezone(&chrono::Utc) + interval;
+    let mut announced = false;
+    loop {
+        let remaining = due - chrono::Utc::now();
+        if remaining <= chrono::Duration::zero() {
+            return;
+        }
+        if !announced {
+            let minutes = remaining.num_minutes() + 1;
+            log!("前回の投稿から間がないため、{minutes}分後に投稿します");
+            announced = true;
+        }
+        let step = remaining.min(chrono::Duration::minutes(1));
+        match step.to_std() {
+            Ok(duration) => tokio::time::sleep(duration).await,
+            Err(_) => return,
+        }
+    }
+}
+
+pub async fn sleep_watching(duration: Duration) {
+    let before = chrono::Utc::now();
+    tokio::time::sleep(duration).await;
+    let Ok(expected) = chrono::Duration::from_std(duration) else {
+        return;
+    };
+    let gap = (chrono::Utc::now() - before) - expected;
+    if gap > chrono::Duration::minutes(2) {
+        log!(
+            "{}ぶん止まっていました（スリープか時刻の飛び）",
+            crate::log::gap_text(gap)
+        );
+    }
+}
+
+pub async fn post_batch(config: &Config, pool: &SqlitePool) {
+    let gap = Duration::from_secs(config.posting.gap_seconds);
+
+    if let Ok(waiting) = db::queued_count(pool).await {
+        log!("投稿待ち {waiting}件");
+    }
+
+    match db::request_card_refetch(pool, config.collect.max_attempts).await {
+        Ok(n) if n > 0 => log!("カード情報が無い{n}件は、取り直すまで投稿を見送ります"),
+        Err(error) => log_error!("card refetch failed: {error:#}"),
+        _ => {}
+    }
+
+    for _ in 0..config.posting.per_batch {
+        match db::posted_today(pool).await {
+            Ok(count) if count >= config.posting.daily_limit => {
+                log!(
+                    "1日の上限（{}件）に達しています",
+                    config.posting.daily_limit
+                );
+                return;
+            }
+            Err(error) => {
+                log_error!("post failed: {error:#}");
+                return;
+            }
+            _ => {}
+        }
+
+        match post_one(config, pool).await {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => {
+                log_error!("post failed: {error:#}");
+                return;
+            }
+        }
+        tokio::time::sleep(gap).await;
+    }
+}
+
+pub async fn sync_posted(config: &Config, pool: &SqlitePool) -> Result<usize> {
+    let client = http::client()?;
+    let links = bluesky::posted_links(&client, config).await?;
+
+    let mut repaired = 0;
+    for link in &links {
+        if db::mark_posted_by_url(pool, link).await? {
+            repaired += 1;
+        }
+    }
+    if repaired > 0 {
+        log!("Bluesky に投稿済みだった{repaired}件を、投稿待ちから外しました");
+    }
+    Ok(repaired)
+}
+
+pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
+    let Some((id, queued)) = db::next_queued(pool).await? else {
+        log!("投稿待ちの記事がありません");
+        return Ok(false);
+    };
+
+    let draft = post::draft(
+        &queued.post_title,
+        &queued.post_body,
+        &queued.post_point,
+        &queued.url,
+        queued.card_title.as_deref().unwrap_or(&queued.title),
+        &queued.card_description,
+        queued.card_image.as_deref(),
+    );
+    if post::empty(&draft) {
+        return Err(anyhow::anyhow!("本文が空です（記事 {id}）"));
+    }
+    if post::too_long(&draft) {
+        return Err(anyhow::anyhow!(
+            "本文が{}字で上限を超えています",
+            draft.text.chars().count()
+        ));
+    }
+
+    let record = post::record(&draft, &chrono::Utc::now().to_rfc3339());
+    let client = http::client()?;
+    let password = bluesky::app_password(config)?;
+    let uri = bluesky::post(
+        &client,
+        config,
+        &password,
+        &record,
+        draft.card_image.as_deref(),
+    )
+    .await?;
+
+    db::mark_posted(pool, id, &uri).await?;
+    log!("{}", bluesky::web_url(&config.bluesky.handle, &uri));
+    Ok(true)
+}

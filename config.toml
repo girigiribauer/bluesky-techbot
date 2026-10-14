@@ -1,0 +1,41 @@
+[sources]
+zenn = "https://zenn.dev/feed"
+hatena = "https://b.hatena.ne.jp/hotentry/it.rss"
+
+[hackernews]
+min_points = 500
+window_hours = 72
+
+[collect]
+interval_minutes = 15
+fetch_batch = 20
+fetch_delay_seconds = 2
+max_attempts = 3
+
+[limits]
+slides = 100
+body_chars = 100000
+min_body_chars = 300
+
+[judge]
+model = "claude-haiku-5-5"
+key_file = "/run/secrets/anthropic"
+batch = 20
+
+[bluesky]
+handle = "tech-invariants.bsky.social"
+service = "https://bsky.social"
+password_file = "/run/secrets/bluesky-app-password"
+
+[posting]
+interval_minutes = 30
+per_batch = 3
+gap_seconds = 120
+daily_limit = 100
+expire_hours = 72
+
+[web]
+port = 8080
+
+[db]
+path = "techbot.db"
