@@ -3,7 +3,7 @@ zenn = "https://zenn.dev/feed"
 hatena = "https://b.hatena.ne.jp/hotentry/it.rss"
 
 [hackernews]
-min_points = 500
+min_points = 300
 window_hours = 72
 
 [collect]
