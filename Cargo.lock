@@ -215,6 +215,7 @@ dependencies = [
  "dom_smoothie",
  "encoding_rs",
  "feed-rs",
+ "getrandom 0.2.17",
  "image",
  "pdf-extract",
  "regex",

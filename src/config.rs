@@ -59,6 +59,7 @@ pub struct Bluesky {
 #[derive(Clone, Deserialize)]
 pub struct Judge {
     pub model: String,
+    pub effort: String,
     pub batch: i64,
 }
 

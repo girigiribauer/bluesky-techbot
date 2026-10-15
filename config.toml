@@ -19,6 +19,7 @@ min_body_chars = 300
 
 [judge]
 model = "claude-haiku-5-5"
+effort = "medium"
 batch = 20
 
 [bluesky]
