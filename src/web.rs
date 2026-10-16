@@ -299,10 +299,10 @@ fn post_url(uri: &str) -> String {
 
 fn basis_label(basis: &str) -> &'static str {
     match basis.trim().to_lowercase().as_str() {
-        "a" => "a 道具が変わっても通用",
-        "b" => "b 仕組みに踏み込む",
-        "c" => "c 前提を問い直す",
-        "d" => "d 新しい発想",
+        "a" => "a 普遍性",
+        "b" => "b 仕組み・原理の理解",
+        "c" => "c 通説を覆す",
+        "d" => "d 発想の斬新さ",
         _ => "",
     }
 }

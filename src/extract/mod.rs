@@ -91,10 +91,47 @@ pub fn card(html: &str, url: &str) -> Card {
     let Ok(readability) = dom_smoothie::Readability::new(html, Some(url), None) else {
         return Card::default();
     };
-    from_metadata(
+    let mut card = from_metadata(
         readability.get_article_metadata(readability.parse_json_ld()),
         url,
-    )
+    );
+    if card.image.is_none() {
+        card.image = meta_image(html).and_then(|image| crate::url::absolutize(url, &image));
+    }
+    card
+}
+
+fn meta_image(html: &str) -> Option<String> {
+    let tag = regex::Regex::new(r"(?is)<meta\b[^>]*>").ok()?;
+    let attribute =
+        regex::Regex::new(r#"(?is)([a-z:_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#).ok()?;
+    let mut twitter = None;
+    for found in tag.find_iter(html) {
+        let mut key = String::new();
+        let mut content = String::new();
+        for captures in attribute.captures_iter(found.as_str()) {
+            let value = captures
+                .get(2)
+                .or_else(|| captures.get(3))
+                .or_else(|| captures.get(4))
+                .map_or("", |value| value.as_str())
+                .trim();
+            match captures[1].to_ascii_lowercase().as_str() {
+                "name" | "property" => key = value.to_ascii_lowercase(),
+                "content" => content = value.replace("&amp;", "&"),
+                _ => {}
+            }
+        }
+        if content.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "og:image" => return Some(content),
+            "twitter:image" if twitter.is_none() => twitter = Some(content),
+            _ => {}
+        }
+    }
+    twitter
 }
 
 pub fn from_metadata(metadata: dom_smoothie::Metadata, url: &str) -> Card {
@@ -226,6 +263,62 @@ mod tests {
                 .image
                 .as_deref(),
             Some("https://example.com/ogp.png")
+        );
+    }
+
+    /// property ではなく name で書かれた og:image も取り出すこと
+    #[test]
+    fn reads_image_from_name_attribute() {
+        let html = r#"<meta name="og:image" content="https://example.com/a.jpg">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").image.as_deref(),
+            Some("https://example.com/a.jpg")
+        );
+    }
+
+    /// content が先に書かれていても、name の og:image を取り出すこと
+    #[test]
+    fn reads_image_whatever_the_attribute_order() {
+        let html = r#"<meta content="https://example.com/a.jpg" name="og:image">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").image.as_deref(),
+            Some("https://example.com/a.jpg")
+        );
+    }
+
+    /// name で書かれた og:image が無ければ、name の twitter:image を使うこと
+    #[test]
+    fn falls_back_to_twitter_image() {
+        let html = r#"<meta name="twitter:image" content="https://example.com/t.jpg">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").image.as_deref(),
+            Some("https://example.com/t.jpg")
+        );
+    }
+
+    /// name で書かれた og:image:width を、og:image と取り違えないこと
+    #[test]
+    fn keeps_similar_name_attributes_apart() {
+        let html = r#"<meta name="og:image:width" content="1200">
+<meta name="og:image" content="https://example.com/a.jpg">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").image.as_deref(),
+            Some("https://example.com/a.jpg")
+        );
+    }
+
+    /// 画像のURLに書かれた &amp; を & に戻すこと
+    #[test]
+    fn unescapes_image_url() {
+        let html = r#"<meta name="og:image" content="https://example.com/a.png?w=1200&amp;h=630">"#;
+
+        assert_eq!(
+            card(html, "https://example.com/a").image.as_deref(),
+            Some("https://example.com/a.png?w=1200&h=630")
         );
     }
 

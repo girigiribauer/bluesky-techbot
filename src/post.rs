@@ -2,6 +2,7 @@ use crate::judge::{compose, is_japanese};
 use serde_json::{Value, json};
 
 pub const TEXT_LIMIT: usize = 300;
+pub const TEXT_MIN: usize = 40;
 
 pub struct Draft {
     pub text: String,
@@ -20,13 +21,8 @@ pub fn draft(
     card_description: &str,
     card_image: Option<&str>,
 ) -> Draft {
-    let head = if is_japanese(title) {
-        title
-    } else {
-        post_title
-    };
     Draft {
-        text: compose(head, post_body, post_point),
+        text: fit_text(head(title, post_title), post_body, post_point),
         link: url.to_string(),
         card_title: title.to_string(),
         card_description: card_description.to_string(),
@@ -34,6 +30,24 @@ pub fn draft(
             .map(|image| image.trim().to_string())
             .filter(|image| !image.is_empty()),
     }
+}
+
+pub fn head<'a>(title: &'a str, post_title: &'a str) -> &'a str {
+    if is_japanese(title) {
+        title
+    } else {
+        post_title
+    }
+}
+
+pub fn fit_text(head: &str, body: &str, point: &str) -> String {
+    for (body, point) in [(body, point), ("", point), ("", "")] {
+        let text = compose(head, body, point);
+        if text.chars().count() <= TEXT_LIMIT {
+            return text;
+        }
+    }
+    head.chars().take(TEXT_LIMIT - 1).chain(['…']).collect()
 }
 
 pub fn record(draft: &Draft, created_at: &str) -> Value {
@@ -57,8 +71,8 @@ pub fn too_long(draft: &Draft) -> bool {
     draft.text.chars().count() > TEXT_LIMIT
 }
 
-pub fn empty(draft: &Draft) -> bool {
-    draft.text.trim().is_empty()
+pub fn too_short(draft: &Draft) -> bool {
+    draft.text.chars().count() < TEXT_MIN
 }
 
 #[cfg(test)]
@@ -175,13 +189,13 @@ mod tests {
         assert_eq!(draft.text, "元の題名\n要約\n\n要点");
     }
 
-    /// 本文が空の投稿を、空と判定できること
+    /// 本文が40字に満たない投稿を、短すぎると判定できること
     #[test]
-    fn detects_empty_text() {
+    fn detects_too_short_text() {
         let blank = draft("", "", "", "https://example.com/a", "", "", None);
-        assert!(empty(&blank));
+        assert!(too_short(&blank));
 
-        let filled = draft(
+        let short = draft(
             "訳題",
             "要約",
             "",
@@ -190,7 +204,18 @@ mod tests {
             "",
             None,
         );
-        assert!(!empty(&filled));
+        assert!(too_short(&short));
+
+        let filled = draft(
+            "訳題",
+            "記事に書かれていることを伝える要約の一文です。",
+            "他の場面にも当てはまる形まで言い切った要点の一文です。",
+            "https://example.com/a",
+            "題名",
+            "",
+            None,
+        );
+        assert!(!too_short(&filled));
     }
 
     /// 本文が300字を超えるかどうかを判定できること
@@ -199,16 +224,54 @@ mod tests {
         let short = draft("あ", "い", "う", "https://example.com/a", "題名", "", None);
         assert!(!too_long(&short));
 
-        let long_body = "あ".repeat(301);
-        let long = draft(
-            "題名",
-            &long_body,
-            "",
-            "https://example.com/a",
-            "題名",
-            "",
-            None,
-        );
+        let long = Draft {
+            text: "あ".repeat(301),
+            link: "https://example.com/a".into(),
+            card_title: "題名".into(),
+            card_description: String::new(),
+            card_image: None,
+        };
         assert!(too_long(&long));
+    }
+
+    /// 上限に収まっているときは、要約も要点も残すこと
+    #[test]
+    fn keeps_all_lines_within_limit() {
+        assert_eq!(fit_text("題名", "要約", "要点"), "題名\n要約\n\n要点");
+    }
+
+    /// 上限を超えるときは、要約を外して収めること
+    #[test]
+    fn drops_body_to_fit() {
+        let head = "あ".repeat(200);
+        let text = fit_text(&head, &"い".repeat(60), &"う".repeat(60));
+
+        assert_eq!(text, format!("{head}\n\n{}", "う".repeat(60)));
+        assert!(text.chars().count() <= TEXT_LIMIT);
+    }
+
+    /// 要約を外しても超えるときは、要点も外して題名だけにすること
+    #[test]
+    fn drops_point_to_fit() {
+        let head = "あ".repeat(280);
+        let text = fit_text(&head, "要約", &"う".repeat(60));
+
+        assert_eq!(text, head);
+    }
+
+    /// 題名だけで上限を超えるときは、題名を切り詰めて収めること
+    #[test]
+    fn trims_long_head() {
+        let text = fit_text(&"あ".repeat(400), "要約", "要点");
+
+        assert_eq!(text.chars().count(), TEXT_LIMIT);
+        assert!(text.ends_with('…'));
+    }
+
+    /// 投稿する1行目は、題名が日本語ならその題名、そうでなければ訳した題名にすること
+    #[test]
+    fn picks_head_by_language() {
+        assert_eq!(head("日本語の題名", "訳した題名"), "日本語の題名");
+        assert_eq!(head("English title", "訳した題名"), "訳した題名");
     }
 }

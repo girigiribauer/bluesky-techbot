@@ -70,16 +70,7 @@ async fn judge_articles(config: &Config, pool: &SqlitePool) -> Result<Judged> {
 
     let mut done = 0;
     for article in &pending {
-        match judge::judge(
-            &client,
-            config,
-            &key,
-            &article.title,
-            &article.source,
-            &article.body,
-        )
-        .await
-        {
+        match judge::judge(&client, config, &key, article).await {
             Ok(verdict) => db::save_verdict(pool, article.id, Some(&verdict), None).await?,
             Err(error) if extract::is_transient(&error) => {
                 db::defer_verdict(pool, article.id, format!("{error:#}")).await?;
@@ -305,8 +296,11 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
         &queued.card_description,
         queued.card_image.as_deref(),
     );
-    if post::empty(&draft) {
-        let error = format!("本文が空です（記事 {id}）");
+    if post::too_short(&draft) {
+        let error = format!(
+            "本文が{}字で短すぎます（記事 {id}）",
+            draft.text.chars().count()
+        );
         db::note_post_error(pool, id, error.clone(), true).await?;
         return Err(anyhow::anyhow!(error));
     }

@@ -61,6 +61,8 @@ pub struct Unjudged {
     pub source: String,
     pub title: String,
     pub body: String,
+    pub card_title: Option<String>,
+    pub post_title: Option<String>,
 }
 
 pub async fn connect(path: &str) -> Result<SqlitePool> {
@@ -429,7 +431,7 @@ pub async fn pending_judge(
     max_attempts: i64,
 ) -> Result<Vec<Unjudged>> {
     let rows = sqlx::query(
-        "SELECT id, source, title, body FROM articles
+        "SELECT id, source, title, body, card_title, post_title FROM articles
          WHERE body IS NOT NULL AND verdict IS NULL AND judge_attempts < ?
          ORDER BY id DESC
          LIMIT ?",
@@ -445,6 +447,8 @@ pub async fn pending_judge(
             source: row.get("source"),
             title: row.get("title"),
             body: row.get("body"),
+            card_title: row.get("card_title"),
+            post_title: row.get("post_title"),
         })
         .collect())
 }
