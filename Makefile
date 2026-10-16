@@ -3,8 +3,8 @@
 VPS ?= scotch
 
 tunnel:
-	@echo "つないでいる間だけ、http://localhost:8080 で本番の画面が見られます（抜けるには exit）"
-	ssh $(VPS) -L 8080:127.0.0.1:8080
+	@echo "http://localhost:8080 で本番の画面が見られます（やめるときは Ctrl-C）"
+	ssh $(VPS) -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080
 
 local-web: stop
 	cargo watch -w src -w config.toml -x 'run -- --web-only'

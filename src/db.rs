@@ -430,7 +430,7 @@ pub async fn pending_judge(
 ) -> Result<Vec<Unjudged>> {
     let rows = sqlx::query(
         "SELECT id, source, title, body FROM articles
-         WHERE body IS NOT NULL AND judged_at IS NULL AND judge_attempts < ?
+         WHERE body IS NOT NULL AND verdict IS NULL AND judge_attempts < ?
          ORDER BY id DESC
          LIMIT ?",
     )
@@ -457,11 +457,12 @@ pub async fn save_verdict(
 ) -> Result<()> {
     sqlx::query(
         "UPDATE articles
-         SET verdict = ?, reason = ?, field = ?, industry = ?, form = ?,
+         SET verdict = ?, reason = ?, field = ?, form = ?,
              basis = ?, depth = ?, post_title = ?, post_body = ?, post_point = ?,
              judge_error = ?, judged_at = ?, judge_attempts = judge_attempts + 1,
              status = CASE
                  WHEN posted_at IS NOT NULL THEN status
+                 WHEN status = 'expired' THEN status
                  WHEN ? = 'pass' THEN 'queued'
                  WHEN ? = 'drop' THEN 'dropped'
                  ELSE status
@@ -471,7 +472,6 @@ pub async fn save_verdict(
     .bind(verdict.map(|v| if v.pass { "pass" } else { "drop" }))
     .bind(verdict.map(|v| v.reason.clone()))
     .bind(verdict.map(|v| v.field.clone()))
-    .bind(verdict.map(|v| v.industry.clone()))
     .bind(verdict.map(|v| v.form.clone()))
     .bind(verdict.map(|v| v.basis.clone()))
     .bind(verdict.map(|v| v.depth.clone()))
@@ -577,15 +577,34 @@ mod tests {
             "INSERT INTO articles
                 (id, source, url, title, collected_at, status, verdict, posted_at, fetched_at,
                  card_title, post_title, post_body, post_point, card_description)
-             VALUES (?, 'test', ?, ?, '2026-10-13T00:00:00Z', ?, ?, ?,
-                     '2026-10-13T00:10:00Z', 'カード題名', '題名', '要約', '要点', '紹介文')",
+             VALUES (?, 'test', ?, ?, ?, ?, ?, ?,
+                     ?, 'カード題名', '題名', '要約', '要点', '紹介文')",
         )
         .bind(id)
         .bind(format!("https://example.com/{id}"))
         .bind(format!("記事{id}"))
+        .bind(chrono::Utc::now().to_rfc3339())
         .bind(status)
         .bind(verdict)
         .bind(posted_at)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn add_fetched(pool: &SqlitePool, id: i64, judged_at: Option<&str>, judge_attempts: i64) {
+        sqlx::query(
+            "INSERT INTO articles
+                (id, source, url, title, collected_at, status, body, judged_at, judge_attempts)
+             VALUES (?, 'test', ?, ?, ?, 'collected', '本文', ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("https://example.com/{id}"))
+        .bind(format!("記事{id}"))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(judged_at)
+        .bind(judge_attempts)
         .execute(pool)
         .await
         .unwrap();
@@ -634,7 +653,6 @@ mod tests {
             pass,
             reason: "理由".into(),
             field: "分野".into(),
-            industry: "業種".into(),
             form: "形".into(),
             basis: "根拠".into(),
             depth: "深さ".into(),
@@ -666,6 +684,68 @@ mod tests {
         let (id, _) = next_queued(&pool, 3).await.unwrap().unwrap();
 
         assert_eq!(id, 3);
+    }
+
+    /// 本文があって判定が付いていない記事は、判定待ちに出ること
+    #[tokio::test]
+    async fn waits_for_first_judge() {
+        let pool = test_pool().await;
+        add_fetched(&pool, 1, None, 0).await;
+
+        let pending = pending_judge(&pool, 10, 3).await.unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, 1);
+    }
+
+    /// 判定が失敗して判定の印だけ付いた記事も、やり直しの上限までは判定待ちに出ること
+    #[tokio::test]
+    async fn retries_failed_judge() {
+        let pool = test_pool().await;
+        add_fetched(&pool, 1, Some("2026-10-16T00:00:00Z"), 1).await;
+
+        let pending = pending_judge(&pool, 10, 3).await.unwrap();
+
+        assert_eq!(pending.len(), 1);
+    }
+
+    /// やり直しの回数が上限に達した記事は、判定待ちに出ないこと
+    #[tokio::test]
+    async fn gives_up_judging_after_max_attempts() {
+        let pool = test_pool().await;
+        add_fetched(&pool, 1, Some("2026-10-16T00:00:00Z"), 3).await;
+
+        let pending = pending_judge(&pool, 10, 3).await.unwrap();
+
+        assert!(pending.is_empty());
+    }
+
+    /// 判定が付いた記事は、判定待ちに出ないこと
+    #[tokio::test]
+    async fn skips_judged_article() {
+        let pool = test_pool().await;
+        add_fetched(&pool, 1, Some("2026-10-16T00:00:00Z"), 1).await;
+        sqlx::query("UPDATE articles SET verdict = 'drop' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let pending = pending_judge(&pool, 10, 3).await.unwrap();
+
+        assert!(pending.is_empty());
+    }
+
+    /// 判定をやり直しても、期限切れの記事は期限切れのまま残ること
+    #[tokio::test]
+    async fn rejudge_keeps_expired() {
+        let pool = test_pool().await;
+        add(&pool, 1, "expired", "pass", None).await;
+
+        save_verdict(&pool, 1, Some(&verdict(true)), None)
+            .await
+            .unwrap();
+
+        assert_eq!(status_of(&pool, 1).await, "expired");
     }
 
     /// 判定をやり直しても、投稿済みの記事は投稿済みのまま残ること
@@ -735,11 +815,7 @@ mod tests {
     #[tokio::test]
     async fn transient_judge_error_keeps_attempts() {
         let pool = test_pool().await;
-        add(&pool, 1, "collected", "", None).await;
-        sqlx::query("UPDATE articles SET body = '本文' WHERE id = 1")
-            .execute(&pool)
-            .await
-            .unwrap();
+        add_fetched(&pool, 1, None, 0).await;
 
         defer_verdict(&pool, 1, "APIに接続できません".to_string())
             .await
