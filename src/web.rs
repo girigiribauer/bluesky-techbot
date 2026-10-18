@@ -53,7 +53,7 @@ async fn record(State(pool): State<SqlitePool>, Query(target): Query<Target>) ->
         &queued.card_description,
         queued.card_image.as_deref(),
     );
-    let record = crate::post::record(&draft, &chrono::Utc::now().to_rfc3339());
+    let record = crate::post::record(&draft, &crate::clock::now_text());
     let json = serde_json::to_string_pretty(&record).unwrap_or_default();
     Html(format!(
         "<!DOCTYPE html><html lang=\"ja\"><head><meta charset=\"utf-8\"><title>投稿レコード</title>
@@ -66,7 +66,7 @@ async fn record(State(pool): State<SqlitePool>, Query(target): Query<Target>) ->
 const STYLE: &str = "
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #111; }
-header { position: sticky; top: 0; background: #fff; border-bottom: 1px solid #e3e6ea; padding: 1rem 1.5rem; }
+header { position: sticky; top: 0; z-index: 10; background: #fff; border-bottom: 1px solid #e3e6ea; padding: 1rem 1.5rem; }
 header .counts span { margin-right: 1rem; color: #777; font-size: 0.8rem; }
 .tabs { display: flex; gap: 0.3rem; margin-top: 0.6rem; }
 .tab { padding: 0.35rem 0.9rem; border-radius: 999px; text-decoration: none; color: #444; font-size: 0.88rem; background: #eef0f3; }
@@ -235,7 +235,10 @@ fn shown_phrase(state: &str, searching: bool) -> &'static str {
 fn item(article: &db::Article) -> String {
     let (kind, badge) = state(article);
 
-    let mut meta = vec![escape(&article.collected_at[..10]), escape(&article.source)];
+    let mut meta = vec![
+        escape(&crate::clock::jst_date(&article.collected_at)),
+        escape(&article.source),
+    ];
     if let Some(score) = article.score {
         meta.push(format!("{score}点"));
     }
@@ -248,7 +251,7 @@ fn item(article: &db::Article) -> String {
         meta.push("上限で打ち切り".to_string());
     }
     if let Some(posted_at) = article.posted_at.as_deref() {
-        let when = posted_at.get(..16).unwrap_or(posted_at).replace('T', " ");
+        let when = crate::clock::jst_datetime(posted_at);
         meta.push(match article.post_uri.as_deref() {
             Some(uri) => format!(
                 "<a href=\"{}\">投稿 {}</a>",

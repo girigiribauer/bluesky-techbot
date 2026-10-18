@@ -1,17 +1,6 @@
 pub fn normalize(url: &str) -> String {
-    let unwrapped = unwrap_archive(url);
-    let without_fragment = unwrapped.split('#').next().unwrap_or(&unwrapped);
+    let without_fragment = url.split('#').next().unwrap_or(url);
     strip_tracking(without_fragment)
-}
-
-fn unwrap_archive(url: &str) -> String {
-    let Some(rest) = url.strip_prefix("https://web.archive.org/web/") else {
-        return url.to_string();
-    };
-    match rest.find("http") {
-        Some(index) => rest[index..].to_string(),
-        None => url.to_string(),
-    }
 }
 
 fn strip_tracking(url: &str) -> String {
@@ -61,13 +50,12 @@ pub fn absolutize(base: &str, link: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// web.archive.org 経由のURLから、元の記事のURLを取り出すこと
+    /// web.archive.org 経由のURLは、そのまま残すこと（元が読めない記事を拾えるように）
     #[test]
-    fn unwraps_archive_url() {
-        assert_eq!(
-            normalize("https://web.archive.org/web/20261011101825/https://example.com/a"),
-            "https://example.com/a"
-        );
+    fn keeps_archive_url() {
+        let archived = "https://web.archive.org/web/20261011101825/https://example.com/a";
+
+        assert_eq!(normalize(archived), archived);
     }
 
     /// 流入経路を示すだけの引数を取り除くこと

@@ -156,7 +156,7 @@ pub async fn insert(pool: &SqlitePool, article: &NewArticle) -> Result<bool> {
     .bind(&article.title)
     .bind(article.score)
     .bind(&article.published_at)
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(crate::clock::now_text())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -306,7 +306,7 @@ pub async fn expire_stale(pool: &SqlitePool, hours: i64) -> Result<u64> {
          SET status = 'expired'
          WHERE status = 'queued' AND posted_at IS NULL AND collected_at < ?",
     )
-    .bind((chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339())
+    .bind(crate::clock::ago_text(chrono::Duration::hours(hours)))
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -361,7 +361,7 @@ pub async fn mark_posted_by_url(pool: &SqlitePool, url: &str) -> Result<bool> {
          SET status = 'posted', posted_at = COALESCE(posted_at, ?)
          WHERE url = ? AND status <> 'posted'",
     )
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(crate::clock::now_text())
     .bind(url)
     .execute(pool)
     .await?;
@@ -388,7 +388,7 @@ pub async fn posted_today(pool: &SqlitePool) -> Result<i64> {
         "SELECT COUNT(*) AS n FROM articles
          WHERE posted_at IS NOT NULL AND posted_at > ?",
     )
-    .bind((chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339())
+    .bind(crate::clock::ago_text(chrono::Duration::hours(24)))
     .fetch_one(pool)
     .await?;
     Ok(row.get("n"))
@@ -401,7 +401,7 @@ pub async fn mark_posted(pool: &SqlitePool, id: i64, uri: &str) -> Result<()> {
          WHERE id = ?",
     )
     .bind(uri)
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(crate::clock::now_text())
     .bind(id)
     .execute(pool)
     .await?;
@@ -510,7 +510,7 @@ pub async fn save_verdict(
     .bind(verdict.map(|v| v.post_body.clone()))
     .bind(verdict.map(|v| v.post_point.clone()))
     .bind(error)
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(crate::clock::now_text())
     .bind(verdict.map(|v| if v.pass { "pass" } else { "drop" }))
     .bind(verdict.map(|v| if v.pass { "pass" } else { "drop" }))
     .bind(id)
@@ -546,7 +546,7 @@ pub async fn save_body(pool: &SqlitePool, id: i64, extracted: Extracted) -> Resu
     .bind(extracted.card_description)
     .bind(extracted.card_image)
     .bind(extracted.error)
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(crate::clock::now_text())
     .bind(id)
     .execute(pool)
     .await?;
@@ -614,11 +614,11 @@ mod tests {
         .bind(id)
         .bind(format!("https://example.com/{id}"))
         .bind(format!("記事{id}"))
-        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(crate::clock::now_text())
         .bind(status)
         .bind(verdict)
         .bind(posted_at)
-        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(crate::clock::now_text())
         .execute(pool)
         .await
         .unwrap();
@@ -633,7 +633,7 @@ mod tests {
         .bind(id)
         .bind(format!("https://example.com/{id}"))
         .bind(format!("記事{id}"))
-        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(crate::clock::now_text())
         .bind(judged_at)
         .bind(judge_attempts)
         .execute(pool)
@@ -654,7 +654,7 @@ mod tests {
 
     async fn collected_days_ago(pool: &SqlitePool, id: i64, days: i64) {
         sqlx::query("UPDATE articles SET collected_at = ? WHERE id = ?")
-            .bind((chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339())
+            .bind(crate::clock::ago_text(chrono::Duration::days(days)))
             .bind(id)
             .execute(pool)
             .await

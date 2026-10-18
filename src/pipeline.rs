@@ -310,7 +310,7 @@ pub async fn post_one(config: &Config, pool: &SqlitePool) -> Result<bool> {
         return Err(anyhow::anyhow!(error));
     }
 
-    let record = post::record(&draft, &chrono::Utc::now().to_rfc3339());
+    let record = post::record(&draft, &crate::clock::now_text());
     let client = http::client()?;
     let password = bluesky::app_password()?;
     let posted = bluesky::post(

@@ -2,6 +2,7 @@
 mod log;
 
 mod bluesky;
+mod clock;
 mod config;
 mod db;
 mod extract;
