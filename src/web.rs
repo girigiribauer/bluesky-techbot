@@ -22,11 +22,14 @@ pub async fn serve(port: u16, pool: SqlitePool) -> Result<()> {
 struct View {
     #[serde(default)]
     state: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
 }
 
 async fn index(State(pool): State<SqlitePool>, Query(view): Query<View>) -> Html<String> {
     let state = view.state.unwrap_or_else(|| "pass".to_string());
-    match render(&pool, &state).await {
+    let search = view.q.unwrap_or_default();
+    match render(&pool, &state, search.trim()).await {
         Ok(html) => Html(html),
         Err(error) => Html(format!("<pre>{}</pre>", escape(&format!("{error:#}")))),
     }
@@ -78,6 +81,21 @@ main { max-width: 56rem; margin: 0 auto; padding: 1.5rem; }
 .meta a { color: #15417e; }
 .meta { color: #777; font-size: 0.78rem; display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
 .title { font-size: 0.98rem; font-weight: 600; line-height: 1.45; }
+.search { display: flex; gap: 0.4rem; margin: 0.6rem 0 0.1rem; }
+.tabs { margin-top: 0.6rem; }
+.search input { flex: 1; max-width: 22rem; padding: 0.35rem 0.7rem; border: 1px solid #d4dbe2; border-radius: 999px; font-size: 0.85rem; background: #fff; color: #111; }
+.search button { padding: 0.35rem 0.9rem; border: 0; border-radius: 999px; background: #15417e; color: #fff; font-size: 0.85rem; cursor: pointer; }
+.search .clear { padding: 0.35rem 0.9rem; border-radius: 999px; background: #eef0f3; color: #444; text-decoration: none; font-size: 0.85rem; display: inline-flex; align-items: center; }
+.shown { color: #777; font-size: 0.78rem; margin-bottom: 0.7rem; }
+.tags { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.45rem; }
+.tag { font-size: 0.72rem; padding: 0.12rem 0.5rem 0.14rem; border-radius: 999px; background: #eef0f3; color: #39404a; }
+.tag i { font-style: normal; opacity: 0.6; margin-right: 0.35rem; font-size: 0.68rem; }
+.tag.basis { background: #e5ecf9; color: #1c4382; }
+.tag.depth.center { background: #dfe8f5; color: #1f3f6e; }
+.tag.depth.part { background: #eceef1; color: #5a6270; }
+.tag.depth.hint { background: #f3f4f6; color: #8a94a0; }
+.tag.field { background: #e4f1e8; color: #246b3a; }
+.tag.form { background: #efe8f6; color: #5b3d86; }
 .title a { color: #15417e; text-decoration: none; }
 .title a:hover { text-decoration: underline; }
 .badge { display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 0.1rem 0.45rem; border-radius: 999px; margin-left: 0.4rem; vertical-align: middle; }
@@ -98,10 +116,11 @@ main { max-width: 56rem; margin: 0 auto; padding: 1.5rem; }
 .post .card:hover { background: #f4f7fa; }
 ";
 
-async fn render(pool: &SqlitePool, state: &str) -> Result<String> {
+async fn render(pool: &SqlitePool, state: &str, search: &str) -> Result<String> {
     let counts = db::count_by_source(pool).await?;
-    let (total, passed, dropped, failed, posted) = db::count_states(pool).await?;
-    let articles = db::recent(pool, state, 300).await?;
+    let found = (!search.is_empty()).then_some(search);
+    let (total, passed, dropped, failed, posted) = db::count_states(pool, found).await?;
+    let articles = db::recent(pool, state, found, 300).await?;
 
     let mut summary = String::new();
     for (source, count) in &counts {
@@ -118,9 +137,57 @@ async fn render(pool: &SqlitePool, state: &str) -> Result<String> {
     .iter()
     .map(|(key, label, count)| {
         let current = if *key == state { " current" } else { "" };
-        format!("<a class=\"tab{current}\" href=\"/?state={key}\">{label} <b>{count}</b></a>")
+        let keep = if search.is_empty() {
+            String::new()
+        } else {
+            format!("&q={}", urlencode(search))
+        };
+        format!("<a class=\"tab{current}\" href=\"/?state={key}{keep}\">{label} <b>{count}</b></a>")
     })
     .collect::<String>();
+
+    let count = tab_count(state, total, passed, dropped, failed, posted);
+    let phrase = shown_phrase(state, found.is_some());
+    let head = match found {
+        Some(word) => format!("「{}」で{phrase}", escape(word)),
+        None => phrase.to_string(),
+    };
+    let shown = if articles.is_empty() {
+        match found {
+            Some(word) => format!(
+                "<div class=\"shown\">「{}」に当てはまる記事はありません</div>",
+                escape(word)
+            ),
+            None => format!("<div class=\"shown\">{phrase}記事はありません</div>"),
+        }
+    } else if (articles.len() as i64) < count {
+        format!(
+            "<div class=\"shown\">{head}{count}件のうち、新しい{}件を表示しています</div>",
+            articles.len()
+        )
+    } else {
+        format!(
+            "<div class=\"shown\">{head}{}件を表示しています</div>",
+            articles.len()
+        )
+    };
+
+    let clear = match found {
+        Some(_) => format!(
+            "<a class=\"clear\" href=\"/?state={}\">クリア</a>",
+            escape(state)
+        ),
+        None => String::new(),
+    };
+    let form = format!(
+        "<form class=\"search\" method=\"get\" action=\"/\">
+<input type=\"hidden\" name=\"state\" value=\"{}\">
+<input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"題名・URL・投稿文から探す\">
+<button type=\"submit\">探す</button>{clear}
+</form>",
+        escape(state),
+        escape(search)
+    );
 
     let mut items = String::new();
     for article in &articles {
@@ -137,11 +204,32 @@ async fn render(pool: &SqlitePool, state: &str) -> Result<String> {
 <style>{STYLE}</style>
 </head>
 <body>
-<header><div class=\"counts\">{summary}</div><nav class=\"tabs\">{tabs}</nav></header>
-<main>{items}</main>
+<header><div class=\"counts\">{summary}</div>{form}<nav class=\"tabs\">{tabs}</nav></header>
+<main>{shown}{items}</main>
 </body>
 </html>"
     ))
+}
+
+fn tab_count(state: &str, total: i64, passed: i64, dropped: i64, failed: i64, posted: i64) -> i64 {
+    match state {
+        "posted" => posted,
+        "drop" => dropped,
+        "failed" => failed,
+        "all" => total,
+        _ => passed,
+    }
+}
+
+fn shown_phrase(state: &str, searching: bool) -> &'static str {
+    match (state, searching) {
+        ("posted", _) => "投稿済みの",
+        ("drop", _) => "落とした",
+        ("failed", _) => "失敗した",
+        ("all", true) => "見つかった",
+        ("all", false) => "全部で",
+        _ => "投稿待ちの",
+    }
 }
 
 fn item(article: &db::Article) -> String {
@@ -158,18 +246,6 @@ fn item(article: &db::Article) -> String {
     }
     if article.truncated {
         meta.push("上限で打ち切り".to_string());
-    }
-    if let Some(field) = article.field.as_deref().filter(|f| !f.is_empty()) {
-        meta.push(escape(field));
-    }
-    if let Some(form) = article.form.as_deref().filter(|f| !f.is_empty()) {
-        meta.push(escape(form));
-    }
-    if let Some(basis) = article.basis.as_deref().filter(|b| !b.is_empty()) {
-        meta.push(basis_label(basis).to_string());
-    }
-    if let Some(depth) = article.depth.as_deref().filter(|d| !d.is_empty()) {
-        meta.push(format!("展開: {}", escape(depth)));
     }
     if let Some(posted_at) = article.posted_at.as_deref() {
         let when = posted_at.get(..16).unwrap_or(posted_at).replace('T', " ");
@@ -209,12 +285,46 @@ fn item(article: &db::Article) -> String {
         "<article class=\"item {kind}\">
 <div class=\"meta\">{}</div>
 <div class=\"title\"><a href=\"{}\">{}</a>{badge}</div>
-{reason}{}
+{}{reason}{}
 </article>",
         meta.join(" · "),
         escape(&article.url),
         escape(&article.title),
+        tags(article),
         post(article),
+    )
+}
+
+fn tags(article: &db::Article) -> String {
+    let mut tags = Vec::new();
+    if let Some(basis) = article.basis.as_deref().filter(|basis| !basis.is_empty()) {
+        tags.push(tag("basis", "関門", basis_label(basis)));
+    }
+    if let Some(depth) = article.depth.as_deref().filter(|depth| !depth.is_empty()) {
+        let kind = match depth {
+            "中心" => "depth center",
+            "部分" => "depth part",
+            _ => "depth hint",
+        };
+        tags.push(tag(kind, "展開", depth));
+    }
+    if let Some(field) = article.field.as_deref().filter(|field| !field.is_empty()) {
+        tags.push(tag("field", "分野", field));
+    }
+    if let Some(form) = article.form.as_deref().filter(|form| !form.is_empty()) {
+        tags.push(tag("form", "性質", form));
+    }
+    if tags.is_empty() {
+        return String::new();
+    }
+    format!("<div class=\"tags\">{}</div>", tags.join(""))
+}
+
+fn tag(kind: &str, label: &str, value: &str) -> String {
+    format!(
+        "<span class=\"tag {kind}\"><i>{}</i>{}</span>",
+        escape(label),
+        escape(value)
     )
 }
 
@@ -316,4 +426,17 @@ fn escape(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn urlencode(text: &str) -> String {
+    let mut encoded = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }

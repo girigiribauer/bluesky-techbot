@@ -162,6 +162,12 @@ pub async fn insert(pool: &SqlitePool, article: &NewArticle) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
+const SEARCH_MATCH: &str = "(title LIKE '%' || ? || '%'
+     OR url LIKE '%' || ? || '%'
+     OR COALESCE(post_title, '') LIKE '%' || ? || '%'
+     OR COALESCE(post_body, '') LIKE '%' || ? || '%'
+     OR COALESCE(post_point, '') LIKE '%' || ? || '%')";
+
 pub fn state_condition(state: &str) -> &'static str {
     match state {
         "pass" => "verdict = 'pass' AND status = 'queued'",
@@ -172,7 +178,16 @@ pub fn state_condition(state: &str) -> &'static str {
     }
 }
 
-pub async fn recent(pool: &SqlitePool, state: &str, limit: i64) -> Result<Vec<Article>> {
+pub async fn recent(
+    pool: &SqlitePool,
+    state: &str,
+    search: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Article>> {
+    let filter = match search {
+        Some(_) => format!(" AND {SEARCH_MATCH}"),
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT id, source, url, title, score, collected_at, status,
                 LENGTH(body) AS body_chars,
@@ -182,16 +197,18 @@ pub async fn recent(pool: &SqlitePool, state: &str, limit: i64) -> Result<Vec<Ar
                 post_title, post_body, post_point,
                 card_title, card_description, card_image
          FROM articles
-         WHERE {}
+         WHERE ({}){filter}
          ORDER BY CASE WHEN ? = 'posted' THEN posted_at END DESC, collected_at DESC, id DESC
          LIMIT ?",
         state_condition(state)
     );
-    let rows = sqlx::query(&sql)
-        .bind(state)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let mut query = sqlx::query(&sql);
+    if let Some(word) = search {
+        for _ in 0..5 {
+            query = query.bind(word);
+        }
+    }
+    let rows = query.bind(state).bind(limit).fetch_all(pool).await?;
     Ok(rows
         .into_iter()
         .map(|row| Article {
@@ -226,17 +243,27 @@ pub async fn recent(pool: &SqlitePool, state: &str, limit: i64) -> Result<Vec<Ar
         .collect())
 }
 
-pub async fn count_states(pool: &SqlitePool) -> Result<(i64, i64, i64, i64, i64)> {
-    let row = sqlx::query(
+pub async fn count_states(
+    pool: &SqlitePool,
+    search: Option<&str>,
+) -> Result<(i64, i64, i64, i64, i64)> {
+    let sql = format!(
         "SELECT COUNT(*) AS total,
                 SUM(verdict = 'pass' AND status = 'queued') AS passed,
                 SUM(verdict = 'drop' OR status = 'expired') AS dropped,
                 SUM(fetch_error IS NOT NULL OR judge_error IS NOT NULL OR post_error IS NOT NULL) AS failed,
                 SUM(status = 'posted') AS posted
-         FROM articles",
-    )
-    .fetch_one(pool)
-    .await?;
+         FROM articles
+         WHERE {}",
+        if search.is_some() { SEARCH_MATCH } else { "1 = 1" }
+    );
+    let mut query = sqlx::query(&sql);
+    if let Some(word) = search {
+        for _ in 0..5 {
+            query = query.bind(word);
+        }
+    }
+    let row = query.fetch_one(pool).await?;
     Ok((
         row.get("total"),
         row.try_get("passed").unwrap_or(0),
@@ -737,6 +764,59 @@ mod tests {
         let pending = pending_judge(&pool, 10, 3).await.unwrap();
 
         assert!(pending.is_empty());
+    }
+
+    /// 検索語を渡すと、題名か投稿文に含む記事だけを返すこと
+    #[tokio::test]
+    async fn searches_title_and_post_text() {
+        let pool = test_pool().await;
+        add(&pool, 1, "queued", "pass", None).await;
+        add(&pool, 2, "queued", "pass", None).await;
+        sqlx::query("UPDATE articles SET title = '量子計算の入門' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE articles SET post_point = 'キャッシュの話です' WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let by_title = recent(&pool, "pass", Some("量子"), 10).await.unwrap();
+        let by_point = recent(&pool, "pass", Some("キャッシュ"), 10).await.unwrap();
+
+        assert_eq!(by_title.len(), 1);
+        assert_eq!(by_title[0].id, 1);
+        assert_eq!(by_point.len(), 1);
+        assert_eq!(by_point[0].id, 2);
+    }
+
+    /// 検索語が無ければ、そのタブの記事をすべて返すこと
+    #[tokio::test]
+    async fn lists_all_without_search() {
+        let pool = test_pool().await;
+        add(&pool, 1, "queued", "pass", None).await;
+        add(&pool, 2, "queued", "pass", None).await;
+
+        assert_eq!(recent(&pool, "pass", None, 10).await.unwrap().len(), 2);
+    }
+
+    /// 落とすタブのように条件が OR のときも、検索で絞り込めること
+    #[tokio::test]
+    async fn searches_within_dropped() {
+        let pool = test_pool().await;
+        add(&pool, 1, "dropped", "drop", None).await;
+        add(&pool, 2, "queued", "pass", None).await;
+        sqlx::query("UPDATE articles SET title = '量子計算の入門' WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            recent(&pool, "drop", Some("量子"), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// 判定をやり直しても、期限切れの記事は期限切れのまま残ること
