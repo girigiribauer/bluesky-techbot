@@ -10,8 +10,14 @@ pub fn ago_text(span: Duration) -> String {
     utc_text(Utc::now() - span)
 }
 
-fn utc_text(at: DateTime<Utc>) -> String {
+pub fn utc_text(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Micros, false)
+}
+
+pub fn utc_text_of(outside: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(outside)
+        .ok()
+        .map(|at| utc_text(at.with_timezone(&Utc)))
 }
 
 pub fn stamp() -> String {
@@ -51,6 +57,26 @@ mod tests {
             .with_timezone(&Utc);
 
         assert_eq!(utc_text(at), "2026-10-14T05:22:40.000000+00:00");
+    }
+
+    /// 配信元から来た時刻は、時差が付いていても UTC に直し、保存する形に揃えること
+    #[test]
+    fn levels_outside_times_to_utc() {
+        assert_eq!(
+            utc_text_of("2026-10-18T21:05:12+09:00").unwrap(),
+            "2026-10-18T12:05:12.000000+00:00"
+        );
+        assert_eq!(
+            utc_text_of("2026-10-17T09:36:16.000Z").unwrap(),
+            "2026-10-17T09:36:16.000000+00:00"
+        );
+    }
+
+    /// 日時として読めないものは揃えず、何も返さないこと
+    #[test]
+    fn levels_nothing_when_unreadable() {
+        assert_eq!(utc_text_of("2026-10-18"), None);
+        assert_eq!(utc_text_of(""), None);
     }
 
     /// 桁が固定されているので、文字列のまま比べても時刻の前後と一致すること

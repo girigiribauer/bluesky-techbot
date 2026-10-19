@@ -22,7 +22,7 @@ pub async fn fetch(
             url: link.href,
             title: title.content,
             score: None,
-            published_at: entry.published.map(|at| at.to_rfc3339()),
+            published_at: entry.published.map(crate::clock::utc_text),
         });
     }
     Ok(articles)

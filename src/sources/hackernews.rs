@@ -59,7 +59,9 @@ pub async fn fetch(
             url,
             title,
             score: hit.points,
-            published_at: hit.created_at,
+            published_at: hit
+                .created_at
+                .map(|at| crate::clock::utc_text_of(&at).unwrap_or(at)),
         });
     }
     Ok(articles)
