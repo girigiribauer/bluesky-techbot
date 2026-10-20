@@ -5,6 +5,9 @@ use dom_smoothie::Readability;
 
 pub async fn extract(client: &reqwest::Client, url: &str, limits: &Limits) -> Result<Content> {
     let html = get_text(client, url).await?;
+    if super::paywalled(&html) {
+        return Err(anyhow!("有料の壁があります"));
+    }
     let source = url.to_string();
     let (extracted, card) = tokio::task::spawn_blocking(move || -> Result<(String, Card)> {
         let mut readability = Readability::new(html.as_str(), Some(&source), None)?;

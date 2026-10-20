@@ -101,6 +101,15 @@ pub fn card(html: &str, url: &str) -> Card {
     card
 }
 
+pub fn paywalled(html: &str) -> bool {
+    let Ok(pattern) =
+        regex::Regex::new(r#"(?is)isAccessibleForFree["'\s]*(?:content)?["'\s]*[:=]["'\s]*false"#)
+    else {
+        return false;
+    };
+    pattern.is_match(html)
+}
+
 fn meta_image(html: &str) -> Option<String> {
     let tag = regex::Regex::new(r"(?is)<meta\b[^>]*>").ok()?;
     let attribute =
@@ -180,6 +189,26 @@ mod tests {
         assert_eq!(sniff_charset(modern).as_deref(), Some("utf-8"));
 
         assert!(sniff_charset(b"<html><body>no meta</body></html>").is_none());
+    }
+
+    /// 有料記事の印（isAccessibleForFree が false）を、JSON-LD でも meta タグでも読めること
+    #[test]
+    fn finds_the_paywall_mark() {
+        assert!(paywalled(
+            r#"{"@type":"NewsArticle","isAccessibleForFree": "False"}"#
+        ));
+        assert!(paywalled(r#"{"isAccessibleForFree":false}"#));
+        assert!(paywalled(
+            r#"<meta itemprop="isAccessibleForFree" content="False">"#
+        ));
+    }
+
+    /// 無料と書いてあるページや、印の無いページを有料と見なさないこと
+    #[test]
+    fn keeps_free_pages_apart() {
+        assert!(!paywalled(r#"{"isAccessibleForFree": "True"}"#));
+        assert!(!paywalled(r#"{"isAccessibleForFree":true}"#));
+        assert!(!paywalled("<html><body>本文だけ</body></html>"));
     }
 
     /// og:description と og:image を取り出すこと

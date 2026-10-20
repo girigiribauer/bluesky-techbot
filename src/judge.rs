@@ -262,6 +262,12 @@ pub async fn judge(
     )
     .await?;
 
+    let post_body = if overlap(&post_body, &post_point) >= SAME_ENOUGH {
+        String::new()
+    } else {
+        post_body
+    };
+
     if verdict.pass && !postable(&head, &post_title, &post_body, &post_point) {
         return Err(anyhow!(
             "通す判定なのに投稿文が作れていません: {}",
@@ -280,6 +286,21 @@ pub async fn judge(
         post_body,
         post_point,
     })
+}
+
+const SAME_ENOUGH: f64 = 0.40;
+
+fn overlap(body: &str, point: &str) -> f64 {
+    let pairs = |text: &str| -> std::collections::HashSet<(char, char)> {
+        let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        chars.windows(2).map(|pair| (pair[0], pair[1])).collect()
+    };
+    let (left, right) = (pairs(body), pairs(point));
+    let smaller = left.len().min(right.len());
+    if smaller == 0 {
+        return 0.0;
+    }
+    left.intersection(&right).count() as f64 / smaller as f64
 }
 
 const LIMIT: usize = 290;
@@ -487,6 +508,29 @@ mod tests {
     #[test]
     fn composes_with_blank_line_before_point() {
         assert_eq!(compose("題名", "要約", "要点"), "題名\n要約\n\n要点");
+    }
+
+    /// 言い回しが違っても、同じことを言っている2行と3行は重なりが大きく出ること
+    #[test]
+    fn finds_lines_saying_the_same() {
+        let body = "WSLコンテナーが、APIやwslservice.exe、軽量仮想マシン、mobyを組み合わせて動く仕組みを解説しています。";
+        let point = "WSLコンテナーは、wslservice.exeが窓口となり、軽量仮想マシン内のmobyへ制御を渡す構造です。";
+        assert!(overlap(body, point) >= SAME_ENOUGH);
+    }
+
+    /// 話題が同じでも、言っていることが違う2行と3行は重ならないこと
+    #[test]
+    fn keeps_different_lines_apart() {
+        let body = "209Mパラメータのモデルが主要ベンチマークで首位を取りました。";
+        let point = "学習のために値を隠す処理と、その値を文脈として残す処理は、役割ごとに分けたほうが情報を無駄にしません。";
+        assert!(overlap(body, point) < SAME_ENOUGH);
+    }
+
+    /// 片方が空なら重なりは0として扱うこと
+    #[test]
+    fn treats_missing_line_as_no_overlap() {
+        assert_eq!(overlap("", "要点だけがあります。"), 0.0);
+        assert_eq!(overlap("要約だけがあります。", ""), 0.0);
     }
 
     /// 要約が無いときは、題名の下に空行を置くこと
